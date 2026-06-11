@@ -19,8 +19,8 @@ type SpecChunk struct {
 
 func ClassifyHeading(text string) string {
     text = strings.ToLower(text)
-    dbRegex := regexp.MustCompile(`(database|models|schema|entities|table)`)
-    apiRegex := regexp.MustCompile(`(api|routes|endpoints|controllers|views)`)
+    dbRegex := regexp.MustCompile(`(database|models?|schema|entit(?:y|ies)|tables?)`)
+    apiRegex := regexp.MustCompile(`(api|routes?|endpoints?|controllers?|views)`)
     if dbRegex.MatchString(text) {
         return "data_schema"
     }
