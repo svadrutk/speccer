@@ -1,6 +1,6 @@
 import unittest
 import ast
-from speccer_parser.parser import SymbolTable, extract_models, resolve_imports
+from parser.parser import SymbolTable, extract_models, resolve_imports
 
 
 class TestDataclassExtraction(unittest.TestCase):

@@ -1,4 +1,4 @@
-package speccer_parser
+package parser
 
 import _ "embed"
 

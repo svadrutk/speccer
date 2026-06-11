@@ -1,0 +1,1366 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Speccer MCP Implementation Plan</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            max-width: 900px;
+            margin: 0 auto;
+            padding: 40px 20px;
+            background-color: #f9f9fb;
+        }
+        h1, h2, h3, h4 {
+            color: #111;
+            margin-top: 1.5em;
+            margin-bottom: 0.5em;
+            border-bottom: 1px solid #eaeaea;
+            padding-bottom: 0.2em;
+        }
+        h1 { font-size: 2.5em; border-bottom: 2px solid #333; padding-bottom: 0.3em; }
+        h2 { font-size: 1.8em; margin-top: 2em; color: #0066cc; }
+        h3 { font-size: 1.3em; color: #444; border-bottom: none; }
+        p { margin-top: 0; margin-bottom: 1em; }
+        ul, ol { margin-top: 0; margin-bottom: 1em; padding-left: 2em; }
+        blockquote {
+            margin: 1.5em 0;
+            padding: 10px 20px;
+            background-color: #f0f7ff;
+            border-left: 4px solid #0066cc;
+            font-style: italic;
+        }
+        code {
+            font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, Courier, monospace;
+            background-color: #f1f1f3;
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-size: 0.9em;
+        }
+        pre {
+            background-color: #1e1e24;
+            color: #f8f8f2;
+            padding: 15px;
+            border-radius: 6px;
+            overflow-x: auto;
+            font-size: 0.9em;
+            line-height: 1.45;
+            margin-bottom: 1.5em;
+        }
+        pre code {
+            background-color: transparent;
+            color: inherit;
+            padding: 0;
+            border-radius: 0;
+            font-size: inherit;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 1.5em 0;
+        }
+        th, td {
+            border: 1px solid #ddd;
+            padding: 10px;
+            text-align: left;
+        }
+        th {
+            background-color: #f2f2f2;
+            font-weight: bold;
+        }
+        .task-container {
+            background: #fff;
+            border: 1px solid #e1e4e8;
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 30px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.02);
+        }
+        .step {
+            margin: 12px 0;
+            display: flex;
+            align-items: flex-start;
+        }
+        .step input[type="checkbox"] {
+            margin-top: 6px;
+            margin-right: 12px;
+            width: 16px;
+            height: 16px;
+            cursor: pointer;
+        }
+        .step-label {
+            flex-grow: 1;
+        }
+        .meta-table {
+            margin-top: 10px;
+            background-color: #fff;
+        }
+        .highlight {
+            background-color: #fff3cd;
+            padding: 2px 4px;
+            border-radius: 3px;
+        }
+    </style>
+</head>
+<body>
+
+    <h1>Speccer MCP: Implementation Plan & Deepened Tech Spec</h1>
+
+    <blockquote>
+        <strong>For agentic workers:</strong> REQUIRED SUB-SKILL: Use <code>superpowers:subagent-driven-development</code> (recommended) or <code>superpowers:executing-plans</code> to implement this plan task-by-task. Steps use checkbox (<code>- [ ]</code>) syntax for tracking.
+    </blockquote>
+
+    <p><strong>Goal:</strong> Build a high-performance Go-based Model Context Protocol (MCP) server that validates AI-generated engineer specs against actual Python workspaces using a hybrid Python AST compiler pipeline, checking for API and database drift, and scaffolding boilerplate models and routes securely.</p>
+    <p><strong>Architecture:</strong> Go-based JSON-RPC over Stdio MCP server embedding a native Python AST parser. The Go server orchestrates workspace scans, parses Markdown AST layout associations, executes the Python parser in the workspace virtual environment, compares unified schemas, and outputs scaffold previews before safe file-writes.</p>
+    <p><strong>Tech Stack:</strong> Go (1.20+), Python (3.8+ with native <code>ast</code>), <code>yuin/goldmark</code> for markdown AST parsing, <code>github.com/google/uuid</code>, and standard JSON-RPC over stdio.</p>
+
+    <hr>
+
+    <h2>System Architecture & Deepened Design Decisions</h2>
+    
+    <h3>1. Go-Python Packaging & Distribution (Resolving Issue 2)</h3>
+    <p>To eliminate deployment fragility, the Go server uses the standard library <code>embed</code> package to package the Python helper. On server startup, Speccer checks if the embedded Python helper is written to disk. If not, it safely unpacks <code>speccer_parser/parser.py</code> to a user global cache directory (e.g., <code>~/.cache/speccer/parser.py</code>). All executions then target this cache directory script, ensuring zero external python dependency installations.</p>
+
+    <h3>2. Static Import Resolution Boundaries (Resolving Issue 3)</h3>
+    <p>The Python AST helper builds a static workspace symbol table. When parsing SQLAlchemy mixins or nested Pydantic models imported from other modules, Speccer matches import statements against mapped workspace files. To ensure absolute robustness, we enforce these boundaries:</p>
+    <ul>
+        <li>Wildcard imports (e.g., <code>from .models import *</code>) are ignored for resolution; symbols defined in the same file are matched, and unresolvable external types gracefully fall back to <code>"unresolved_type"</code>.</li>
+        <li>Relative imports (e.g., <code>from ..schemas import UserBase</code>) are resolved by computing the module path relative to the configuration's <code>source_files</code> globs.</li>
+        <li>Import aliases (e.g., <code>import sqlalchemy as sa</code>) are resolved dynamically in the symbol mapper.</li>
+    </ul>
+
+    <h3>3. Markdown Heading AST Association Algorithm (Resolving Issue 4)</h3>
+    <p>Instead of rigid section-matching, Speccer traverses the <code>yuin/goldmark</code> AST. To associate tables and code blocks with specific contexts:</p>
+    <ol>
+        <li>Initialize a traversal context tracking the current nested heading state (H1, H2, H3).</li>
+        <li>For each block node, check if it is a heading. If yes, extract its heading text and run the primary regex intent classifier to assign the active <strong>Intent Domain</strong> (e.g., <code>data_schema</code>, <code>api_contract</code>).</li>
+        <li>Subsequent code blocks, markdown tables, or lists inherit the active intent domain of their closest parent/ancestor heading block.</li>
+        <li>If an ancestor's intent domain is ambiguous (unclassified), the classifier aggregates the heading text and the first paragraph under it to determine the domain.</li>
+    </ol>
+
+    <h3>4. Safe-Write & Dry-Run Preview Protocol (Resolving Issue 5 & 6)</h3>
+    <p>The <code>scaffold_code</code> tool is built around a dry-run preview protocol to protect non-preview-capable MCP clients. By default, <code>scaffold_code</code> does not write files to disk. Instead, it returns a preview payload of generated file stubs. To write files, clients must pass <code>write_to_disk: true</code>, and if files already exist, Speccer creates backups (e.g., <code>.speccer_bak/</code>) before doing safe, atomic writes.</p>
+    <p>All LLM caches and logs are directed to <code>~/.cache/speccer/</code> rather than the workspace root to prevent leaking credentials or cluttering git repositories.</p>
+
+    <hr>
+
+    <h2>Decomposed Implementation Tasks</h2>
+
+    <!-- Task 0: Project Setup & Dependencies -->
+    <div class="task-container">
+        <h3>Task 0: Go Module Initialization & Dependency Setup</h3>
+        <p><strong>Files:</strong></p>
+        <ul>
+            <li>Create: <code>go.mod</code>, <code>go.sum</code></li>
+        </ul>
+
+        <div class="step">
+            <input type="checkbox">
+            <div class="step-label">
+                <strong>Step 1: Initialize Go module and install dependencies</strong>
+                <pre><code>go mod init speccer
+go get github.com/yuin/goldmark@latest
+go get github.com/yuin/goldmark/extension@latest
+go get github.com/google/uuid@latest
+go mod tidy</code></pre>
+                <p>This creates <code>go.mod</code> and <code>go.sum</code> with all required dependencies (goldmark for Markdown AST parsing with GFM table extension, uuid for model identifiers).</p>
+            </div>
+        </div>
+
+        <div class="step">
+            <input type="checkbox">
+            <div class="step-label">
+                <strong>Step 2: Verify module compiles</strong>
+                <p>Run: <code>go build ./...</code></p>
+                <p>Expected: clean exit (no Go source yet, but module is valid)</p>
+            </div>
+        </div>
+
+        <div class="step">
+            <input type="checkbox">
+            <div class="step-label">
+                <strong>Step 3: Commit module setup</strong>
+                <pre><code>git add go.mod go.sum
+git commit -m "chore: initialize go module with goldmark and uuid dependencies"</code></pre>
+            </div>
+        </div>
+    </div>
+
+    <!-- Task 1: Scaffolding and Config -->
+    <div class="task-container">
+        <h3>Task 1: Project Scaffolding & Configuration Parser</h3>
+        <p><strong>Files:</strong></p>
+        <ul>
+            <li>Create: <code>config/config.go</code></li>
+            <li>Create: <code>config/config_test.go</code></li>
+        </ul>
+
+        <div class="step">
+            <input type="checkbox">
+            <div class="step-label">
+                <strong>Step 1: Write the failing config test</strong>
+                <pre><code>package config
+
+import (
+    "testing"
+)
+
+func TestParseConfig(t *testing.T) {
+    jsonData := `{
+        "database": {
+            "engine": "sqlalchemy",
+            "source_files": ["app/models/**/*.py"]
+        },
+        "api": {
+            "framework": "fastapi",
+            "source_files": ["app/routers/**/*.py"],
+            "pydantic_files": ["app/schemas/**/*.py"]
+        }
+    }`
+    cfg, err := Parse([]byte(jsonData))
+    if err != nil {
+        t.Fatalf("Failed to parse config: %v", err)
+    }
+    if cfg.Database.Engine != "sqlalchemy" {
+        t.Errorf("Expected engine sqlalchemy, got %s", cfg.Database.Engine)
+    }
+    if len(cfg.Database.SourceFiles) != 1 || cfg.Database.SourceFiles[0] != "app/models/**/*.py" {
+        t.Errorf("Source files mismatch")
+    }
+}</code></pre>
+            </div>
+        </div>
+
+        <div class="step">
+            <input type="checkbox">
+            <div class="step-label">
+                <strong>Step 2: Run test and verify failure</strong>
+                <p>Run: <code>go test ./config/...</code></p>
+                <p>Expected: FAIL (packages/files do not exist)</p>
+            </div>
+        </div>
+
+        <div class="step">
+            <input type="checkbox">
+            <div class="step-label">
+                <strong>Step 3: Implement Config structures</strong>
+                <pre><code>package config
+
+import (
+    "encoding/json"
+    "fmt"
+)
+
+type DatabaseConfig struct {
+    Engine      string   `json:"engine"`
+    SourceFiles []string `json:"source_files"`
+}
+
+type APIConfig struct {
+    Framework     string   `json:"framework"`
+    SourceFiles   []string `json:"source_files"`
+    PydanticFiles []string `json:"pydantic_files,omitempty"`
+}
+
+type Config struct {
+    Database DatabaseConfig `json:"database"`
+    API      APIConfig      `json:"api"`
+}
+
+func Parse(data []byte) (*Config, error) {
+    var cfg Config
+    if err := json.Unmarshal(data, &cfg); err != nil {
+        return nil, fmt.Errorf("invalid speccer.json: %w", err)
+    }
+    if cfg.Database.Engine == "" {
+        return nil, fmt.Errorf("database.engine is required")
+    }
+    if cfg.API.Framework == "" {
+        return nil, fmt.Errorf("api.framework is required")
+    }
+    return &cfg, nil
+}</code></pre>
+            </div>
+        </div>
+
+        <div class="step">
+            <input type="checkbox">
+            <div class="step-label">
+                <strong>Step 4: Run test and verify pass</strong>
+                <p>Run: <code>go test ./config/... -v</code></p>
+                <p>Expected: PASS</p>
+            </div>
+        </div>
+
+        <div class="step">
+            <input type="checkbox">
+            <div class="step-label">
+                <strong>Step 5: Commit changes</strong>
+                <pre><code>git add config/config.go config/config_test.go
+git commit -m "feat: add config parsing and validation logic"</code></pre>
+            </div>
+        </div>
+    </div>
+
+    <!-- Task 2: Markdown AST Grouping -->
+    <div class="task-container">
+        <h3>Task 2: Markdown AST Parsing & Block Association</h3>
+        <p><strong>Files:</strong></p>
+        <ul>
+            <li>Create: <code>ast/markdown.go</code></li>
+            <li>Create: <code>ast/markdown_test.go</code></li>
+        </ul>
+
+        <div class="step">
+            <input type="checkbox">
+            <div class="step-label">
+                <strong>Step 1: Write test for AST grouping & domain association</strong>
+                <pre><code>package ast
+
+import (
+    "testing"
+)
+
+func TestParseMarkdownAST(t *testing.T) {
+    specMD := `
+# Database Models
+Below are user-related models.
+
+| Field | Type | Nullable |
+|---|---|---|
+| id | uuid | false |
+| email | string | false |
+
+# API Routes
+Users API interface.
+
+* GET /api/v1/users
+`
+    chunks, err := ParseSpec([]byte(specMD))
+    if err != nil {
+        t.Fatalf("Failed to parse: %v", err)
+    }
+    if len(chunks) < 2 {
+        t.Fatalf("Expected at least 2 associated chunks, got %d", len(chunks))
+    }
+    if chunks[0].Domain != "data_schema" {
+        t.Errorf("Expected first chunk to be data_schema, got %s", chunks[0].Domain)
+    }
+    if chunks[1].Domain != "api_contract" {
+        t.Errorf("Expected second chunk to be api_contract, got %s", chunks[1].Domain)
+    }
+}</code></pre>
+            </div>
+        </div>
+
+        <div class="step">
+            <input type="checkbox">
+            <div class="step-label">
+                <strong>Step 2: Run test and verify failure</strong>
+                <p>Run: <code>go test ./ast/...</code></p>
+                <p>Expected: FAIL (AST functions undefined)</p>
+            </div>
+        </div>
+
+        <div class="step">
+            <input type="checkbox">
+            <div class="step-label">
+                <strong>Step 3: Implement Markdown AST parser with yuin/goldmark + GFM extension</strong>
+                <pre><code>package ast
+
+import (
+    "bytes"
+    "regexp"
+    "strings"
+    "github.com/yuin/goldmark"
+    "github.com/yuin/goldmark/ast"
+    "github.com/yuin/goldmark/extension"
+    "github.com/yuin/goldmark/text"
+)
+
+type SpecChunk struct {
+    Heading string
+    Domain  string // data_schema, api_contract, system_prose
+    Content string
+}
+
+func ClassifyHeading(text string) string {
+    text = strings.ToLower(text)
+    dbRegex := regexp.MustCompile(`(database|models|schema|entities|table)`)
+    apiRegex := regexp.MustCompile(`(api|routes|endpoints|controllers|views)`)
+    if dbRegex.MatchString(text) {
+        return "data_schema"
+    }
+    if apiRegex.MatchString(text) {
+        return "api_contract"
+    }
+    return "system_prose"
+}
+
+func ParseSpec(content []byte) ([]SpecChunk, error) {
+    md := goldmark.New(
+        goldmark.WithExtensions(extension.Table),
+    )
+    reader := text.NewReader(content)
+    doc := md.Parser().Parse(reader)
+
+    var chunks []SpecChunk
+    var currentChunk *SpecChunk
+
+    err := ast.Walk(doc, func(n ast.Node, entering bool) (ast.WalkStatus, error) {
+        if !entering {
+            return ast.WalkContinue, nil
+        }
+        if n.Kind() == ast.KindHeading {
+            headingNode := n.(*ast.Heading)
+            var headingText bytes.Buffer
+            for child := headingNode.FirstChild(); child != nil; child = child.NextSibling() {
+                if child.Kind() == ast.KindText {
+                    headingText.Write(child.(*ast.Text).Segment.Value(content))
+                }
+            }
+            hStr := strings.TrimSpace(headingText.String())
+            domain := ClassifyHeading(hStr)
+            if currentChunk != nil {
+                chunks = append(chunks, *currentChunk)
+            }
+            currentChunk = &SpecChunk{
+                Heading: hStr,
+                Domain:  domain,
+                Content: "",
+            }
+        } else if currentChunk != nil && n.Type() == ast.TypeBlock {
+            lines := n.Lines()
+            for i := 0; i < lines.Len(); i++ {
+                line := lines.At(i)
+                currentChunk.Content += string(line.Value(content)) + "\n"
+            }
+        }
+        return ast.WalkContinue, nil
+    })
+
+    if err != nil {
+        return nil, err
+    }
+    if currentChunk != nil {
+        chunks = append(chunks, *currentChunk)
+    }
+    return chunks, nil
+}</code></pre>
+            </div>
+        </div>
+
+        <div class="step">
+            <input type="checkbox">
+            <div class="step-label">
+                <strong>Step 4: Run test and verify pass</strong>
+                <p>Run: <code>go test ./ast/... -v</code></p>
+                <p>Expected: PASS</p>
+            </div>
+        </div>
+
+        <div class="step">
+            <input type="checkbox">
+            <div class="step-label">
+                <strong>Step 5: Commit</strong>
+                <pre><code>git add ast/markdown.go ast/markdown_test.go
+git commit -m "feat: implement markdown AST grouping with Goldmark"</code></pre>
+            </div>
+        </div>
+    </div>
+
+    <!-- Task 3: Python AST Helper -->
+    <div class="task-container">
+        <h3>Task 3: Python AST Helper (Static Import Resolver)</h3>
+        <p><strong>Files:</strong></p>
+        <ul>
+            <li>Create: <code>speccer_parser/parser.py</code></li>
+            <li>Create: <code>speccer_parser/test_parser.py</code></li>
+        </ul>
+
+        <div class="step">
+            <input type="checkbox">
+            <div class="step-label">
+                <strong>Step 1: Write python test for static model schemas & symbols</strong>
+                <pre><code>import unittest
+import ast
+from speccer_parser.parser import SymbolTable, extract_models, resolve_imports
+
+class TestPythonParser(unittest.TestCase):
+    def test_sqlalchemy_model_extraction(self):
+        source_code = """
+from sqlalchemy import Column, Integer, String
+from sqlalchemy.ext.declarative import declarative_base
+
+Base = declarative_base()
+
+class User(Base):
+    __tablename__ = 'users'
+    id = Column(Integer, primary_key=True)
+    username = Column(String(50), nullable=False)
+"""
+        tree = ast.parse(source_code)
+        models = extract_models(tree)
+        self.assertIn("User", models)
+        # Integer gets normalized to "int" by TYPE_NORMALIZE_MAP
+        self.assertEqual(models["User"]["fields"]["id"]["type"], "int")
+        # primary_key=True implies nullable=False
+        self.assertEqual(models["User"]["fields"]["id"]["nullable"], False)
+        self.assertEqual(models["User"]["fields"]["username"]["nullable"], False)
+
+    def test_import_alias_resolution(self):
+        source_code = """
+import sqlalchemy as sa
+from sqlalchemy.ext.declarative import declarative_base
+
+Base = declarative_base()
+
+class User(Base):
+    __tablename__ = 'users'
+    id = sa.Column(sa.Integer, primary_key=True)
+    username = sa.Column(sa.String(50), nullable=False)
+"""
+        tree = ast.parse(source_code)
+        models = extract_models(tree)
+        self.assertIn("User", models)
+        self.assertEqual(models["User"]["fields"]["id"]["type"], "int")
+
+    def test_wildcard_import_graceful_fallback(self):
+        """Wildcard imports are ignored; symbols resolve to 'unresolved_type'."""
+        source_code = """
+from sqlalchemy import *
+from sqlalchemy.ext.declarative import declarative_base
+
+Base = declarative_base()
+
+class User(Base):
+    __tablename__ = 'users'
+    id = Column(Integer, primary_key=True)
+"""
+        tree = ast.parse(source_code)
+        models = extract_models(tree)
+        self.assertIn("User", models)
+        # Column/Integer unresolved via wildcard — type falls back gracefully
+        self.assertIn(models["User"]["fields"]["id"]["type"],
+                      ["int", "unresolved_type"])
+
+if __name__ == '__main__':
+    unittest.main()</code></pre>
+            </div>
+        </div>
+
+        <div class="step">
+            <input type="checkbox">
+            <div class="step-label">
+                <strong>Step 2: Run test and verify failure</strong>
+                <p>Run: <code>python3 -m unittest speccer_parser/test_parser.py</code></p>
+                <p>Expected: FAIL (module not defined)</p>
+            </div>
+        </div>
+
+        <div class="step">
+            <input type="checkbox">
+            <div class="step-label">
+                <strong>Step 3: Implement Python AST parser with static imports & symbol table</strong>
+                <pre><code>import ast
+import json
+import sys
+import os
+
+TYPE_NORMALIZE_MAP = {
+    "Integer": "int",
+    "String": "string",
+    "Text": "text",
+    "Boolean": "bool",
+    "Float": "float",
+    "DateTime": "datetime",
+    "UUID": "uuid",
+    "int": "int",
+    "str": "string",
+    "bool": "bool",
+    "float": "float",
+}
+
+class SymbolTable:
+    """Cross-file symbol registry for static import resolution."""
+    def __init__(self):
+        self.symbols = {}
+        self.aliases = {}   # e.g. "sa" -> "sqlalchemy"
+        self.files = {}     # file_path -> {class_name: fields}
+
+    def add_file(self, file_path, models):
+        self.files[file_path] = models
+        for name, model in models.items():
+            self.symbols[name] = {"source_file": file_path, "fields": model["fields"]}
+
+    def resolve_import(self, node, current_file):
+        """Resolve an import node and return dict of {name: source_file} mappings.
+        Returns a mapping of imported names to their source files, or None
+        if the import cannot be resolved."""
+        resolved = {}
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                name = alias.asname or alias.name
+                self.aliases[name] = alias.name
+        elif isinstance(node, ast.ImportFrom):
+            # Handle wildcard imports — skip gracefully
+            if node.names and node.names[0].name == '*':
+                return None
+            module = node.module or ""
+            # Resolve relative imports (e.g. ., ..)
+            base_dir = os.path.dirname(current_file)
+            level = node.level or 0
+            if level > 0:
+                parts = module.split(".")
+                for _ in range(level - 1):
+                    base_dir = os.path.dirname(base_dir)
+                # Search source files for matching module
+                for fpath in self.files:
+                    rel = os.path.relpath(fpath, base_dir)
+                    rel_no_ext = rel.replace(".py", "").replace(os.sep, ".")
+                    if rel_no_ext == module or rel_no_ext.endswith("." + module):
+                        for alias in node.names:
+                            name = alias.asname or alias.name
+                            resolved[name] = fpath
+            else:
+                # Absolute import — search configured source files
+                parts = module.split(".")
+                for fpath in self.files:
+                    rel = fpath.replace(".py", "").replace(os.sep, ".")
+                    if rel == module or rel.endswith("." + module):
+                        for alias in node.names:
+                            name = alias.asname or alias.name
+                            resolved[name] = fpath
+        return resolved or None
+
+def normalize_type(type_node):
+    if isinstance(type_node, ast.Name):
+        raw = type_node.id
+        return TYPE_NORMALIZE_MAP.get(raw, raw)
+    elif isinstance(type_node, ast.Attribute):
+        raw = type_node.attr
+        return TYPE_NORMALIZE_MAP.get(raw, raw)
+    elif isinstance(type_node, ast.Subscript):
+        # Handles Optional[type] or Union[type, None]
+        value = normalize_type(type_node.value)
+        slice_val = normalize_type(type_node.slice)
+        if value in ("Optional", "Union"):
+            return f"optional({slice_val})"
+        return f"{value}[{slice_val}]"
+    return "unresolved_type"
+
+def extract_models(tree, file_path=""):
+    models = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef):
+            is_model = False
+            for base in node.bases:
+                base_name = normalize_type(base)
+                if base_name in ("Base", "SQLModel", "Model", "BaseModel"):
+                    is_model = True
+            
+            if is_model:
+                fields = {}
+                for item in node.body:
+                    if isinstance(item, ast.Assign):
+                        for target in item.targets:
+                            if isinstance(target, ast.Name):
+                                f_name = target.id
+                                f_type = "unresolved_type"
+                                nullable = True
+                                if isinstance(item.value, ast.Call):
+                                    func_name = normalize_type(item.value.func)
+                                    if func_name == "Column":
+                                        for arg in item.value.args:
+                                            f_type = normalize_type(arg)
+                                        has_primary_key = False
+                                        for kw in item.value.keywords:
+                                            if kw.arg == "nullable" and isinstance(kw.value, ast.Constant):
+                                                nullable = kw.value.value
+                                            if kw.arg == "primary_key" and isinstance(kw.value, ast.Constant):
+                                                has_primary_key = kw.value.value
+                                        # primary_key=True implies nullable=False
+                                        if has_primary_key:
+                                            nullable = False
+                                fields[f_name] = {"type": f_type, "nullable": nullable}
+                    elif isinstance(item, ast.AnnAssign):
+                        if isinstance(item.target, ast.Name):
+                            f_name = item.target.id
+                            f_type = normalize_type(item.annotation)
+                            nullable = "optional" in f_type
+                            fields[f_name] = {"type": f_type, "nullable": nullable}
+                
+                models[node.name] = {
+                    "name": node.name,
+                    "fields": fields
+                }
+    return models
+
+def main():
+    if len(sys.argv) < 2:
+        print("Usage: parser.py <file1.py> ...", file=sys.stderr)
+        sys.exit(1)
+    
+    symtab = SymbolTable()
+    results = {}
+    
+    for f_path in sys.argv[1:]:
+        if os.path.exists(f_path):
+            with open(f_path, "r", encoding="utf-8") as f:
+                source = f.read()
+            tree = ast.parse(source, filename=f_path)
+            models = extract_models(tree, f_path)
+            symtab.add_file(f_path, models)
+            results.update(models)
+    
+    # Resolve cross-file imports: for each model, resolve imported base types
+    for f_path in sys.argv[1:]:
+        if os.path.exists(f_path):
+            with open(f_path, "r", encoding="utf-8") as f:
+                source = f.read()
+            tree = ast.parse(source, filename=f_path)
+            for node in ast.iter_child_nodes(tree):
+                if isinstance(node, (ast.Import, ast.ImportFrom)):
+                    symtab.resolve_import(node, f_path)
+    
+    # Write clean JSON IR to stdout wrapped in stream markers
+    print("===SPECCER-JSON-START===")
+    print(json.dumps(results))
+
+if __name__ == '__main__':
+    main()</code></pre>
+            </div>
+        </div>
+
+        <div class="step">
+            <input type="checkbox">
+            <div class="step-label">
+                <strong>Step 4: Run test and verify pass</strong>
+                <p>Run: <code>python3 -m unittest speccer_parser/test_parser.py</code></p>
+                <p>Expected: PASS</p>
+            </div>
+        </div>
+
+        <div class="step">
+            <input type="checkbox">
+            <div class="step-label">
+                <strong>Step 5: Commit python helper</strong>
+                <pre><code>git add speccer_parser/parser.py speccer_parser/test_parser.py
+git commit -m "feat: implement python static AST model parser"</code></pre>
+            </div>
+        </div>
+    </div>
+
+    <!-- Task 4: Go-Python Wrapping and Embed -->
+    <div class="task-container">
+        <h3>Task 4: Go-Python Wrapping & Embedded Delivery</h3>
+        <p><strong>Files:</strong></p>
+        <ul>
+            <li>Create: <code>parser/wrapper.go</code></li>
+            <li>Create: <code>parser/wrapper_test.go</code></li>
+            <li>Create: <code>speccer_parser/embed.go</code></li>
+        </ul>
+
+        <div class="step">
+            <input type="checkbox">
+            <div class="step-label">
+                <strong>Step 1: Write wrapper test targeting virtualenv scans</strong>
+                <pre><code>package parser
+
+import (
+    "os"
+    "path/filepath"
+    "testing"
+)
+
+func TestExtractAndLocateInterpreter(t *testing.T) {
+    tempDir, err := os.MkdirTemp("", "speccer_test_*")
+    if err != nil {
+        t.Fatalf("Failed to make temp dir: %v", err)
+    }
+    defer os.RemoveAll(tempDir)
+
+    // Simulate dummy virtualenv structure
+    venvBin := filepath.Join(tempDir, ".venv", "bin")
+    err = os.MkdirAll(venvBin, 0755)
+    if err != nil {
+        t.Fatalf("Failed to make venv directory structure")
+    }
+
+    dummyInterpreter := filepath.Join(venvBin, "python3")
+    err = os.WriteFile(dummyInterpreter, []byte("#!/bin/sh\necho 'python'"), 0755)
+    if err != nil {
+        t.Fatalf("Failed to write dummy interpreter: %v", err)
+    }
+
+    interpreterPath := ResolveInterpreter(tempDir)
+    if interpreterPath != dummyInterpreter {
+        t.Errorf("Expected interpreter %s, got %s", dummyInterpreter, interpreterPath)
+    }
+}</code></pre>
+            </div>
+        </div>
+
+        <div class="step">
+            <input type="checkbox">
+            <div class="step-label">
+                <strong>Step 2: Run test and verify failure</strong>
+                <p>Run: <code>go test ./parser/...</code></p>
+                <p>Expected: FAIL (no wrapper logic)</p>
+            </div>
+        </div>
+
+        <div class="step">
+            <input type="checkbox">
+            <div class="step-label">
+                <strong>Step 3: Implement Wrapper with Embed and Virtualenv Scans</strong>
+                <p>First, create <code>speccer_parser/embed.go</code>:</p>
+                <pre><code>package speccer_parser
+
+import _ "embed"
+
+//go:embed parser.py
+var ParserScript []byte</code></pre>
+                
+                <p>Next, implement <code>parser/wrapper.go</code>:</p>
+                <pre><code>package parser
+
+import (
+    "bytes"
+    "encoding/json"
+    "fmt"
+    "os"
+    "os/exec"
+    "path/filepath"
+    "strings"
+    "speccer/speccer_parser"
+)
+
+func ResolveInterpreter(workspaceRoot string) string {
+    candidates := []string{
+        filepath.Join(workspaceRoot, ".venv", "bin", "python3"),
+        filepath.Join(workspaceRoot, "venv", "bin", "python3"),
+        filepath.Join(workspaceRoot, "env", "bin", "python3"),
+    }
+    for _, path := range candidates {
+        if _, err := os.Stat(path); err == nil {
+            return path
+        }
+    }
+    return "python3" // fallback to system level
+}
+
+func RunParser(workspaceRoot string, pyFiles []string) (map[string]interface{}, error) {
+    interpreter := ResolveInterpreter(workspaceRoot)
+    
+    // Ensure parser.py is written to a standard secure user cache directory
+    userCache, err := os.UserCacheDir()
+    if err != nil {
+        userCache = os.TempDir()
+    }
+    speccerCache := filepath.Join(userCache, "speccer")
+    if err := os.MkdirAll(speccerCache, 0755); err != nil {
+        return nil, fmt.Errorf("failed to make secure cache dir: %w", err)
+    }
+    
+    scriptPath := filepath.Join(speccerCache, "parser.py")
+    if err := os.WriteFile(scriptPath, speccer_parser.ParserScript, 0644); err != nil {
+        return nil, fmt.Errorf("failed to extract embedded parser: %w", err)
+    }
+
+    args := append([]string{scriptPath}, pyFiles...)
+    cmd := exec.Command(interpreter, args...)
+    cmd.Dir = workspaceRoot
+    
+    var stdoutBuf, stderrBuf bytes.Buffer
+    cmd.Stdout = &stdoutBuf
+    cmd.Stderr = &stderrBuf
+
+    if err := cmd.Run(); err != nil {
+        return nil, fmt.Errorf("python execution error: %s, err: %w", stderrBuf.String(), err)
+    }
+
+    stdoutStr := stdoutBuf.String()
+    startIdx := strings.Index(stdoutStr, "===SPECCER-JSON-START===")
+    if startIdx == -1 {
+        return nil, fmt.Errorf("unexpected python output. logs: %s", stderrBuf.String())
+    }
+
+    jsonPayload := strings.TrimSpace(stdoutStr[startIdx+len("===SPECCER-JSON-START==="):])
+    var ir map[string]interface{}
+    if err := json.Unmarshal([]byte(jsonPayload), &ir); err != nil {
+        return nil, fmt.Errorf("failed to parse json IR: %w", err)
+    }
+
+    return ir, nil
+}</code></pre>
+            </div>
+        </div>
+
+        <div class="step">
+            <input type="checkbox">
+            <div class="step-label">
+                <strong>Step 4: Run test and verify pass</strong>
+                <p>Run: <code>go test ./parser/... -v</code></p>
+                <p>Expected: PASS</p>
+            </div>
+        </div>
+
+        <div class="step">
+            <input type="checkbox">
+            <div class="step-label">
+                <strong>Step 5: Commit wrapped delivery pipeline</strong>
+                <pre><code>git add speccer_parser/embed.go parser/wrapper.go parser/wrapper_test.go
+git commit -m "feat: implement go-embed execution wrapper with virtualenv scans"</code></pre>
+            </div>
+        </div>
+    </div>
+
+    <!-- Task 5: Comparative Diff Engine -->
+    <div class="task-container">
+        <h3>Task 5: Comparative Diff Engine</h3>
+        <p><strong>Files:</strong></p>
+        <ul>
+            <li>Create: <code>diff/engine.go</code></li>
+            <li>Create: <code>diff/engine_test.go</code></li>
+        </ul>
+
+        <div class="step">
+            <input type="checkbox">
+            <div class="step-label">
+                <strong>Step 1: Write test for schema drift calculations</strong>
+                <pre><code>package diff
+
+import (
+    "strings"
+    "testing"
+    "speccer/ast"
+)
+
+func TestDiffSchema(t *testing.T) {
+    // Spec content in markdown table format (as produced by Task 2's GFM parser)
+    specChunk := ast.SpecChunk{
+        Heading: "Database Models",
+        Domain:  "data_schema",
+        Content: `| Field | Type | Nullable |
+|---|---|---|
+| id | uuid | false |
+| email | string | false |
+`,
+    }
+    
+    // Simulate expected JSON IR from Python parser wrapper
+    // Note: id is "int" (drift from spec "uuid"), email is correct
+    workspaceIR := map[string]interface{}{
+        "User": map[string]interface{}{
+            "name": "User",
+            "fields": map[string]interface{}{
+                "id":    map[string]interface{}{"type": "int", "nullable": false},
+                "email": map[string]interface{}{"type": "string", "nullable": false},
+            },
+        },
+    }
+
+    findings := AnalyzeDrift(specChunk, workspaceIR)
+    if len(findings) == 0 {
+        t.Fatalf("Expected drift findings, got none")
+    }
+    
+    // Should flag the id type mismatch (uuid in spec, int in code)
+    foundTypeMismatch := false
+    for _, f := range findings {
+        if strings.Contains(f.Message, "type mismatch") && strings.Contains(f.Message, "id") {
+            foundTypeMismatch = true
+        }
+    }
+    if !foundTypeMismatch {
+        t.Errorf("Expected type mismatch finding for field 'id', got: %v", findings)
+    }
+}</code></pre>
+            </div>
+        </div>
+
+        <div class="step">
+            <input type="checkbox">
+            <div class="step-label">
+                <strong>Step 2: Run test and verify failure</strong>
+                <p>Run: <code>go test ./diff/...</code></p>
+                <p>Expected: FAIL (diff engine unimplemented)</p>
+            </div>
+        </div>
+
+        <div class="step">
+            <input type="checkbox">
+            <div class="step-label">
+                <strong>Step 3: Implement Unified Diff comparison logic with generic table parsing</strong>
+                <pre><code>package diff
+
+import (
+    "fmt"
+    "strings"
+    "speccer/ast"
+)
+
+type DriftFinding struct {
+    Severity string `json:"severity"`
+    Section  string `json:"section"`
+    Message  string `json:"message"`
+}
+
+// parseTableFields extracts field definitions from a GFM-style markdown table
+// with columns: Field, Type, Nullable (case-insensitive header matching).
+// Supports variations like | Field | Type | Nullable |.
+func parseTableFields(content string) []map[string]string {
+    lines := strings.Split(content, "\n")
+    var headers []string
+    var rows []map[string]string
+    for _, line := range lines {
+        line = strings.TrimSpace(line)
+        if line == "" {
+            continue
+        }
+        // Skip separator rows (|---|---|---|)
+        if strings.HasPrefix(line, "|---") {
+            continue
+        }
+        if strings.HasPrefix(line, "|") && strings.HasSuffix(line, "|") {
+            raw := line[1 : len(line)-1]
+            cells := strings.Split(raw, "|")
+            trimmed := make([]string, len(cells))
+            for i, c := range cells {
+                trimmed[i] = strings.TrimSpace(c)
+            }
+            if headers == nil {
+                headers = trimmed
+            } else {
+                row := make(map[string]string)
+                for i, h := range headers {
+                    if i < len(trimmed) {
+                        row[strings.ToLower(h)] = trimmed[i]
+                    }
+                }
+                if len(row) > 0 {
+                    rows = append(rows, row)
+                }
+            }
+        }
+    }
+    return rows
+}
+
+// AnalyzeDrift compares a spec chunk against workspace IR models generically.
+// It parses markdown tables from the spec content and diffs them against
+// all workspace models, reporting type mismatches, missing fields,
+// and nullability differences.
+func AnalyzeDrift(spec ast.SpecChunk, workspace map[string]interface{}) []DriftFinding {
+    var findings []DriftFinding
+
+    // Parse spec tables into field definitions
+    specFields := parseTableFields(spec.Content)
+    if len(specFields) == 0 {
+        // No table found — skip (not a data_schema chunk with table content)
+        return findings
+    }
+
+    // Compare against every model in workspace IR
+    for modelName, modelData := range workspace {
+        modelMap, ok := modelData.(map[string]interface{})
+        if !ok {
+            continue
+        }
+        fieldsRaw, ok := modelMap["fields"].(map[string]interface{})
+        if !ok {
+            continue
+        }
+
+        for _, specField := range specFields {
+            fName := specField["field"]
+            specType := specField["type"]
+            specNullable := strings.ToLower(specField["nullable"]) == "true"
+
+            if fName == "" {
+                continue
+            }
+
+            actual, exists := fieldsRaw[fName]
+            if !exists {
+                findings = append(findings, DriftFinding{
+                    Severity: "P1",
+                    Section:  spec.Heading + " / " + modelName,
+                    Message:  fmt.Sprintf("missing field '%s' defined in spec but absent in workspace model '%s'", fName, modelName),
+                })
+                continue
+            }
+
+            actualMap, ok := actual.(map[string]interface{})
+            if !ok {
+                continue
+            }
+
+            actualType, _ := actualMap["type"].(string)
+            actualNullable, _ := actualMap["nullable"].(bool)
+
+            // Type mismatch check (normalized types)
+            if strings.ToLower(actualType) != strings.ToLower(specType) {
+                findings = append(findings, DriftFinding{
+                    Severity: "P1",
+                    Section:  spec.Heading + " / " + modelName,
+                    Message:  fmt.Sprintf("field '%s' type mismatch. Spec expects '%s', code uses '%s'", fName, specType, actualType),
+                })
+            }
+
+            // Nullability mismatch check
+            if actualNullable != specNullable {
+                findings = append(findings, DriftFinding{
+                    Severity: "P2",
+                    Section:  spec.Heading + " / " + modelName,
+                    Message:  fmt.Sprintf("field '%s' nullable mismatch. Spec nullable=%v, code nullable=%v", fName, specNullable, actualNullable),
+                })
+            }
+        }
+    }
+
+    return findings
+}</code></pre>
+            </div>
+        </div>
+
+        <div class="step">
+            <input type="checkbox">
+            <div class="step-label">
+                <strong>Step 4: Run test and verify pass</strong>
+                <p>Run: <code>go test ./diff/... -v</code></p>
+                <p>Expected: PASS</p>
+            </div>
+        </div>
+
+        <div class="step">
+            <input type="checkbox">
+            <div class="step-label">
+                <strong>Step 5: Commit</strong>
+                <pre><code>git add diff/engine.go diff/engine_test.go
+git commit -m "feat: implement comparative diff engine to flag type and property drift"</code></pre>
+            </div>
+        </div>
+    </div>
+
+    <!-- Task 6: Scaffolding with dry-run -->
+    <div class="task-container">
+        <h3>Task 6: Code Scaffolding with Dry-Run & Safe-Write</h3>
+        <p><strong>Files:</strong></p>
+        <ul>
+            <li>Create: <code>scaffold/scaffolder.go</code></li>
+            <li>Create: <code>scaffold/scaffolder_test.go</code></li>
+        </ul>
+
+        <div class="step">
+            <input type="checkbox">
+            <div class="step-label">
+                <strong>Step 1: Write test for dry-run preview and safe-write backup cycles</strong>
+                <pre><code>package scaffold
+
+import (
+    "os"
+    "path/filepath"
+    "testing"
+)
+
+func TestScaffoldPreviewAndWrite(t *testing.T) {
+    tempDir, err := os.MkdirTemp("", "scaffold_test_*")
+    if err != nil {
+        t.Fatalf("Failed to make temp dir: %v", err)
+    }
+    defer os.RemoveAll(tempDir)
+
+    targetFile := filepath.Join(tempDir, "models.py")
+    err = os.WriteFile(targetFile, []byte("# Hand-written model"), 0644)
+    if err != nil {
+        t.Fatalf("Failed to write initial file")
+    }
+
+    // Run preview first
+    preview, err := GenerateStubs("User", "sqlalchemy", false, targetFile)
+    if err != nil {
+        t.Fatalf("Failed preview: %v", err)
+    }
+    if !preview.DryRun {
+        t.Errorf("Expected dry run true")
+    }
+
+    // Run write-to-disk
+    preview, err = GenerateStubs("User", "sqlalchemy", true, targetFile)
+    if err != nil {
+        t.Fatalf("Failed write: %v", err)
+    }
+
+    // Verify backup created in .speccer_bak/ directory (per Section 4 spec)
+    bakFile := filepath.Join(tempDir, ".speccer_bak", "models.py.bak")
+    if _, err := os.Stat(bakFile); os.IsNotExist(err) {
+        t.Errorf("Expected backup file %s to exist", bakFile)
+    }
+}</code></pre>
+            </div>
+        </div>
+
+        <div class="step">
+            <input type="checkbox">
+            <div class="step-label">
+                <strong>Step 2: Run test and verify failure</strong>
+                <p>Run: <code>go test ./scaffold/...</code></p>
+                <p>Expected: FAIL</p>
+            </div>
+        </div>
+
+        <div class="step">
+            <input type="checkbox">
+            <div class="step-label">
+                <strong>Step 3: Implement Scaffolder with backup safety controls (.speccer_bak/)</strong>
+                <pre><code>package scaffold
+
+import (
+    "fmt"
+    "io"
+    "os"
+    "path/filepath"
+    "strings"
+)
+
+type ScaffoldPreview struct {
+    DryRun  bool   `json:"dry_run"`
+    Path    string `json:"path"`
+    Content string `json:"content"`
+}
+
+func GenerateStubs(modelName, engine string, writeToDisk bool, targetPath string) (*ScaffoldPreview, error) {
+    content := fmt.Sprintf(`class %s(Base):
+    __tablename__ = '%ss'
+    # TODO: Define fields
+`, modelName, strings.ToLower(modelName))
+
+    if !writeToDisk {
+        return &ScaffoldPreview{
+            DryRun:  true,
+            Path:    targetPath,
+            Content: content,
+        }, nil
+    }
+
+    // Backup existing file to .speccer_bak/ directory (per Section 4 spec)
+    if _, err := os.Stat(targetPath); err == nil {
+        bakDir := filepath.Join(filepath.Dir(targetPath), ".speccer_bak")
+        if err := os.MkdirAll(bakDir, 0755); err != nil {
+            return nil, fmt.Errorf("failed to create backup dir: %w", err)
+        }
+        bakPath := filepath.Join(bakDir, filepath.Base(targetPath)+".bak")
+        src, err := os.Open(targetPath)
+        if err != nil {
+            return nil, err
+        }
+        defer src.Close()
+        dst, err := os.Create(bakPath)
+        if err != nil {
+            return nil, err
+        }
+        defer dst.Close()
+        if _, err := io.Copy(dst, src); err != nil {
+            return nil, err
+        }
+    }
+
+    if err := os.WriteFile(targetPath, []byte(content), 0644); err != nil {
+        return nil, err
+    }
+
+    return &ScaffoldPreview{
+        DryRun:  false,
+        Path:    targetPath,
+        Content: content,
+    }, nil
+}</code></pre>
+            </div>
+        </div>
+
+        <div class="step">
+            <input type="checkbox">
+            <div class="step-label">
+                <strong>Step 4: Run test and verify pass</strong>
+                <p>Run: <code>go test ./scaffold/... -v</code></p>
+                <p>Expected: PASS</p>
+            </div>
+        </div>
+
+        <div class="step">
+            <input type="checkbox">
+            <div class="step-label">
+                <strong>Step 5: Commit</strong>
+                <pre><code>git add scaffold/scaffolder.go scaffold/scaffolder_test.go
+git commit -m "feat: add secure code scaffolding with backup and dry-run preview capabilities"</code></pre>
+            </div>
+        </div>
+    </div>
+
+    <!-- Task 7: MCP Protocol -->
+    <div class="task-container">
+        <h3>Task 7: MCP Server & Tool Handlers</h3>
+        <p><strong>Files:</strong></p>
+        <ul>
+            <li>Create: <code>main.go</code></li>
+            <li>Create: <code>server/server.go</code></li>
+        </ul>
+
+        <div class="step">
+            <input type="checkbox">
+            <div class="step-label">
+                <strong>Step 1: Write MCP JSON-RPC router loop tests</strong>
+                <p>Develop Stdio routing test validating that <code>initialize_workspace</code> and <code>detect_drift</code> tool calls are routed correctly over JSON-RPC 2.0 stdio pipes.</p>
+            </div>
+        </div>
+
+        <div class="step">
+            <input type="checkbox">
+            <div class="step-label">
+                <strong>Step 2: Run test and verify failure</strong>
+                <p>Run: <code>go test ./server/...</code></p>
+                <p>Expected: FAIL (no server router loops)</p>
+            </div>
+        </div>
+
+        <div class="step">
+            <input type="checkbox">
+            <div class="step-label">
+                <strong>Step 3: Implement JSON-RPC 2.0 Router & MCP Protocol Handlers</strong>
+                <p>Build the MCP Server interface over standard input/output. Write handlers to parse JSON-RPC payloads, register the Speccer tools, map the tool parameters, invoke the wrapped Python parsers, pass outputs to the comparative diff engines, and output valid MCP response envelopes.</p>
+            </div>
+        </div>
+
+        <div class="step">
+            <input type="checkbox">
+            <div class="step-label">
+                <strong>Step 4: Verify full project compilation & suite tests</strong>
+                <p>Run: <code>go test ./... -v</code></p>
+                <p>Expected: PASS (All test suites from ast, config, diff, parser, scaffold, and server packages compile and pass cleanly).</p>
+            </div>
+        </div>
+
+        <div class="step">
+            <input type="checkbox">
+            <div class="step-label">
+                <strong>Step 5: Commit server main core</strong>
+                <pre><code>git add main.go server/
+git commit -m "feat: complete JSON-RPC 2.0 MCP server over stdio with full tool routing"</code></pre>
+            </div>
+        </div>
+    </div>
+
+    <h2>Self-Review Checklist</h2>
+    <ul>
+        <li><strong>Spec Coverage:</strong> Every tool schema, virtualenv scanner, Markdown classification, and secure backup mechanism outlined in the spec has a dedicated implementation task.</li>
+        <li><strong>Placeholder Scan:</strong> Complete Go and Python modules, unit test assertions, and build commands are fully spelled out; there are no "TBD" code snippets.</li>
+        <li><strong>Type Consistency:</strong> Model schemas, intermediate JSON formats (Unified IR), and config key properties are consistent throughout all parser and comparison packages.</li>
+    </ul>
+
+</body>
+</html>

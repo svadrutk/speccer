@@ -1,4 +1,4 @@
-package parser
+package pyexec
 
 import (
 	"bytes"
@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"speccer/speccer_parser"
+	"speccer/parser"
 )
 
 func ResolveInterpreter(workspaceRoot string) string {
@@ -39,7 +39,7 @@ func RunParser(workspaceRoot string, pyFiles []string) (map[string]interface{}, 
 	}
 
 	scriptPath := filepath.Join(speccerCache, "parser.py")
-	if err := os.WriteFile(scriptPath, speccer_parser.ParserScript, 0644); err != nil {
+	if err := os.WriteFile(scriptPath, parser.ParserScript, 0644); err != nil {
 		return nil, fmt.Errorf("failed to extract embedded parser: %w", err)
 	}
 
