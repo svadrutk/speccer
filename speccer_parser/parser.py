@@ -83,57 +83,128 @@ def normalize_type(type_node):
         return TYPE_NORMALIZE_MAP.get(raw, raw)
     elif isinstance(type_node, ast.Subscript):
         value = normalize_type(type_node.value)
+        if value == "Annotated":
+            if isinstance(type_node.slice, ast.Tuple) and type_node.slice.elts:
+                return normalize_type(type_node.slice.elts[0])
+            return normalize_type(type_node.slice)
+        if value == "Mapped":
+            return normalize_type(type_node.slice)
         slice_val = normalize_type(type_node.slice)
         if value in ("Optional", "Union"):
             return f"optional({slice_val})"
         return f"{value}[{slice_val}]"
+    elif isinstance(type_node, ast.Constant):
+        if type_node.value is None:
+            return "None"
+        return str(type_node.value)
+    elif isinstance(type_node, ast.BinOp) and isinstance(type_node.op, ast.BitOr):
+        left = normalize_type(type_node.left)
+        right = normalize_type(type_node.right)
+        if right == "None":
+            return f"optional({left})"
+        return f"union({left}, {right})"
+    elif isinstance(type_node, ast.Tuple):
+        parts = [normalize_type(elt) for elt in type_node.elts]
+        return ", ".join(parts)
     return "unresolved_type"
+
+
+MODEL_BASE_NAMES = frozenset((
+    "Base", "SQLModel", "Model", "BaseModel",
+    "TypedDict", "NamedTuple",
+))
+
+
+def _is_dataclass(node):
+    for decorator in node.decorator_list:
+        if isinstance(decorator, ast.Name) and decorator.id == "dataclass":
+            return True
+        if isinstance(decorator, ast.Attribute) and decorator.attr == "dataclass":
+            return True
+    return False
+
+
+def _merge_inherited_fields(node, fields, models):
+    for base in node.bases:
+        parent_name = normalize_type(base)
+        if parent_name in models:
+            for fname, fdata in models[parent_name]["fields"].items():
+                if fname not in fields:
+                    fields[fname] = dict(fdata)
 
 
 def extract_models(tree, file_path=""):
     models = {}
     for node in ast.walk(tree):
-        if isinstance(node, ast.ClassDef):
-            is_model = False
+        if not isinstance(node, ast.ClassDef):
+            continue
+
+        is_model = False
+        for base in node.bases:
+            base_name = normalize_type(base)
+            if base_name in MODEL_BASE_NAMES:
+                is_model = True
+                break
+
+        if not is_model and _is_dataclass(node):
+            is_model = True
+
+        if not is_model:
             for base in node.bases:
                 base_name = normalize_type(base)
-                if base_name in ("Base", "SQLModel", "Model", "BaseModel"):
+                if base_name in models:
                     is_model = True
+                    break
 
-            if is_model:
-                fields = {}
-                for item in node.body:
-                    if isinstance(item, ast.Assign):
-                        for target in item.targets:
-                            if isinstance(target, ast.Name):
-                                f_name = target.id
-                                f_type = "unresolved_type"
-                                nullable = True
-                                if isinstance(item.value, ast.Call):
-                                    func_name = normalize_type(item.value.func)
-                                    if func_name == "Column":
-                                        for arg in item.value.args:
-                                            f_type = normalize_type(arg)
-                                        has_primary_key = False
-                                        for kw in item.value.keywords:
-                                            if kw.arg == "nullable" and isinstance(kw.value, ast.Constant):
-                                                nullable = kw.value.value
-                                            if kw.arg == "primary_key" and isinstance(kw.value, ast.Constant):
-                                                has_primary_key = kw.value.value
-                                        if has_primary_key:
-                                            nullable = False
-                                fields[f_name] = {"type": f_type, "nullable": nullable}
-                    elif isinstance(item, ast.AnnAssign):
-                        if isinstance(item.target, ast.Name):
-                            f_name = item.target.id
-                            f_type = normalize_type(item.annotation)
-                            nullable = "optional" in f_type
-                            fields[f_name] = {"type": f_type, "nullable": nullable}
+        if not is_model:
+            continue
 
-                models[node.name] = {
-                    "name": node.name,
-                    "fields": fields
-                }
+        fields = {}
+        _merge_inherited_fields(node, fields, models)
+
+        for item in node.body:
+            if isinstance(item, ast.Assign):
+                for target in item.targets:
+                    if isinstance(target, ast.Name):
+                        f_name = target.id
+                        f_type = "unresolved_type"
+                        nullable = True
+                        if isinstance(item.value, ast.Call):
+                            func_name = normalize_type(item.value.func)
+                            if func_name == "Column":
+                                for arg in item.value.args:
+                                    f_type = normalize_type(arg)
+                                has_primary_key = False
+                                for kw in item.value.keywords:
+                                    if kw.arg == "nullable" and isinstance(kw.value, ast.Constant):
+                                        nullable = kw.value.value
+                                    if kw.arg == "primary_key" and isinstance(kw.value, ast.Constant):
+                                        has_primary_key = kw.value.value
+                                if has_primary_key:
+                                    nullable = False
+                        fields[f_name] = {"type": f_type, "nullable": nullable}
+            elif isinstance(item, ast.AnnAssign):
+                if isinstance(item.target, ast.Name):
+                    f_name = item.target.id
+                    f_type = normalize_type(item.annotation)
+                    nullable = "optional" in f_type
+                    if isinstance(item.value, ast.Call):
+                        func_name = normalize_type(item.value.func)
+                        if func_name == "mapped_column":
+                            has_primary_key = False
+                            for kw in item.value.keywords:
+                                if kw.arg == "nullable" and isinstance(kw.value, ast.Constant):
+                                    nullable = kw.value.value
+                                if kw.arg == "primary_key" and isinstance(kw.value, ast.Constant):
+                                    has_primary_key = kw.value.value
+                            if has_primary_key:
+                                nullable = False
+                    fields[f_name] = {"type": f_type, "nullable": nullable}
+
+        models[node.name] = {
+            "name": node.name,
+            "fields": fields
+        }
     return models
 
 
